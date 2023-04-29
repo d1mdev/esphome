@@ -166,18 +166,6 @@ void PN7160::set_tag_write_message(optional<std::string> message, optional<bool>
   ESP_LOGD(TAG, "Message to write has been set");
 }
 
-void PN7160::init_failure_handler_() {
-  ESP_LOGE(TAG, "Communication failure");
-  if (this->fail_count_ < NFCC_MAX_COMM_FAILS) {
-    ESP_LOGE(TAG, "Initialization attempt %u failed, retrying...", this->fail_count_++);
-    this->nci_fsm_set_state_(NCIState::NFCC_RESET);
-  } else {
-    ESP_LOGE(TAG, "Too many initialization failures -- check device connections");
-    this->mark_failed();
-    this->nci_fsm_set_state_(NCIState::FAILED);
-  }
-}
-
 uint8_t PN7160::reset_core_(const bool reset_config, const bool power) {
   if (this->dwl_req_pin_ != nullptr) {
     this->dwl_req_pin_->digital_write(false);
@@ -197,7 +185,7 @@ uint8_t PN7160::reset_core_(const bool reset_config, const bool power) {
   nfc::NciMessage tx(nfc::NCI_PKT_MT_CTRL_COMMAND, nfc::NCI_CORE_GID, nfc::NCI_CORE_RESET_OID,
                      {(uint8_t) reset_config});
 
-  if (this->transceive_(tx, rx, NFCC_FULL_TIMEOUT) != nfc::STATUS_OK) {
+  if (this->transceive_(tx, rx, NFCC_INIT_TIMEOUT) != nfc::STATUS_OK) {
     ESP_LOGE(TAG, "Error sending reset command");
     return nfc::STATUS_FAILED;
   }
@@ -207,7 +195,7 @@ uint8_t PN7160::reset_core_(const bool reset_config, const bool power) {
     return rx.get_simple_status_response();
   }
   // read reset notification
-  if (this->read_nfcc_(rx, NFCC_FULL_TIMEOUT) != nfc::STATUS_OK) {
+  if (this->read_nfcc_(rx, NFCC_INIT_TIMEOUT) != nfc::STATUS_OK) {
     ESP_LOGE(TAG, "Reset notification was not received");
     return nfc::STATUS_FAILED;
   }
@@ -373,8 +361,17 @@ uint8_t PN7160::start_discovery_() {
   nfc::NciMessage tx(nfc::NCI_PKT_MT_CTRL_COMMAND, nfc::RF_GID, nfc::RF_DISCOVER_OID, discover_config);
 
   if (this->transceive_(tx, rx) != nfc::STATUS_OK) {
-    ESP_LOGE(TAG, "Error starting discovery");
-    return nfc::STATUS_FAILED;
+    switch (rx.get_simple_status_response()) {
+      // in any of these cases, we are either already in or will remain in discovery, which satisfies the function call
+      case nfc::DISCOVERY_ALREADY_STARTED:
+      case nfc::DISCOVERY_TARGET_ACTIVATION_FAILED:
+      case nfc::DISCOVERY_TEAR_DOWN:
+        return nfc::STATUS_OK;
+
+      default:
+        ESP_LOGE(TAG, "Error starting discovery");
+        return nfc::STATUS_FAILED;
+    }
   }
 
   return nfc::STATUS_OK;
@@ -552,7 +549,8 @@ void PN7160::nci_fsm_transition_() {
     case NCIState::NFCC_RESET:
       if (this->reset_core_(true, true) != nfc::STATUS_OK) {
         ESP_LOGE(TAG, "Failed to reset NCI core");
-        this->init_failure_handler_();
+        this->nci_fsm_set_error_state_(NCIState::NFCC_RESET);
+        return;
       } else {
         this->nci_fsm_set_state_(NCIState::NFCC_INIT);
       }
@@ -561,7 +559,8 @@ void PN7160::nci_fsm_transition_() {
     case NCIState::NFCC_INIT:
       if (this->init_core_(true) != nfc::STATUS_OK) {
         ESP_LOGE(TAG, "Failed to initialise NCI core");
-        this->init_failure_handler_();
+        this->nci_fsm_set_error_state_(NCIState::NFCC_INIT);
+        return;
       } else {
         this->nci_fsm_set_state_(NCIState::NFCC_CONFIG);
       }
@@ -570,7 +569,8 @@ void PN7160::nci_fsm_transition_() {
     case NCIState::NFCC_CONFIG:
       if (this->send_init_config_() != nfc::STATUS_OK) {
         ESP_LOGE(TAG, "Failed to send initial config");
-        this->init_failure_handler_();
+        this->nci_fsm_set_error_state_(NCIState::NFCC_CONFIG);
+        return;
       } else {
         this->config_refresh_pending_ = false;
         this->nci_fsm_set_state_(NCIState::NFCC_SET_DISCOVER_MAP);
@@ -581,6 +581,7 @@ void PN7160::nci_fsm_transition_() {
       if (this->set_discover_map_() != nfc::STATUS_OK) {
         ESP_LOGE(TAG, "Failed to set discover map");
         this->nci_fsm_set_error_state_(NCIState::NFCC_SET_LISTEN_MODE_ROUTING);
+        return;
       } else {
         this->nci_fsm_set_state_(NCIState::NFCC_SET_LISTEN_MODE_ROUTING);
       }
@@ -590,6 +591,7 @@ void PN7160::nci_fsm_transition_() {
       if (this->set_listen_mode_routing_() != nfc::STATUS_OK) {
         ESP_LOGE(TAG, "Failed to set listen mode routing");
         this->nci_fsm_set_error_state_(NCIState::RFST_IDLE);
+        return;
       } else {
         this->nci_fsm_set_state_(NCIState::RFST_IDLE);
       }
@@ -653,11 +655,18 @@ void PN7160::nci_fsm_set_state_(NCIState new_state) {
 }
 
 bool PN7160::nci_fsm_set_error_state_(NCIState new_state) {
-  ESP_LOGVV(TAG, "nci_fsm_set_error_state_(%u)", (uint8_t) new_state);
+  ESP_LOGVV(TAG, "nci_fsm_set_error_state_(%u); error_count_ = %u", (uint8_t) new_state, this->error_count_);
   this->nci_state_error_ = new_state;
   if (this->error_count_++ > NFCC_MAX_ERROR_COUNT) {
-    ESP_LOGE(TAG, "Too many errors transitioning to state %u; resetting NFCC", (uint8_t) this->nci_state_error_);
-    this->nci_fsm_set_state_(NCIState::NFCC_RESET);
+    if ((this->nci_state_error_ == NCIState::NFCC_RESET) || (this->nci_state_error_ == NCIState::NFCC_INIT) ||
+        (this->nci_state_error_ == NCIState::NFCC_CONFIG)) {
+      ESP_LOGE(TAG, "Too many initialization failures -- check device connections");
+      this->mark_failed();
+      this->nci_fsm_set_state_(NCIState::FAILED);
+    } else {
+      ESP_LOGE(TAG, "Too many errors transitioning to state %u; resetting NFCC", (uint8_t) this->nci_state_error_);
+      this->nci_fsm_set_state_(NCIState::NFCC_RESET);
+    }
   }
   return this->error_count_ > NFCC_MAX_ERROR_COUNT;
 }

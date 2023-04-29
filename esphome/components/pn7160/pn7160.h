@@ -16,7 +16,6 @@ namespace esphome {
 namespace pn7160 {
 
 static const uint16_t NFCC_DEFAULT_TIMEOUT = 5;
-static const uint16_t NFCC_FULL_TIMEOUT = 1000;
 static const uint16_t NFCC_INIT_TIMEOUT = 50;
 static const uint16_t NFCC_TAG_WRITE_TIMEOUT = 15;
 
@@ -209,8 +208,6 @@ class PN7160 : public Component {
   void set_tag_write_message(optional<std::string> message, optional<bool> include_android_app_record);
 
  protected:
-  void init_failure_handler_();
-
   uint8_t reset_core_(bool reset_config, bool power);
   uint8_t init_core_(bool store_report);
   uint8_t send_init_config_();
