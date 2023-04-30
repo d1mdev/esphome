@@ -216,7 +216,7 @@ uint8_t PN7160::reset_core_(const bool reset_config, const bool power) {
   return nfc::STATUS_OK;
 }
 
-uint8_t PN7160::init_core_(const bool store_report) {
+uint8_t PN7160::init_core_() {
   nfc::NciMessage rx;
   nfc::NciMessage tx(nfc::NCI_PKT_MT_CTRL_COMMAND, nfc::NCI_CORE_GID, nfc::NCI_CORE_INIT_OID);
 
@@ -227,21 +227,20 @@ uint8_t PN7160::init_core_(const bool store_report) {
 
   if (!rx.simple_status_response_is(nfc::STATUS_OK)) {
     ESP_LOGE(TAG, "Invalid initialise response: %s", nfc::format_bytes(rx.get_message()).c_str());
-  } else if (store_report) {
-    this->hw_version_ = rx.get_message()[17 + rx.get_message()[8]];
-    this->rom_code_version_ = rx.get_message()[18 + rx.get_message()[8]];
-    this->flash_major_version_ = rx.get_message()[19 + rx.get_message()[8]];
-    this->flash_minor_version_ = rx.get_message()[20 + rx.get_message()[8]];
+    return nfc::STATUS_FAILED;
   }
 
-  ESP_LOGD(TAG, "Hardware version: %u", this->hw_version_);
-  ESP_LOGD(TAG, "ROM code version: %u", this->rom_code_version_);
-  ESP_LOGD(TAG, "FLASH major version: %u", this->flash_major_version_);
-  ESP_LOGD(TAG, "FLASH minor version: %u", this->flash_minor_version_);
-  ESP_LOGD(TAG, "Features[0]: 0x%02X", rx.get_message()[4]);
-  ESP_LOGD(TAG, "Features[1]: 0x%02X", rx.get_message()[5]);
-  ESP_LOGD(TAG, "Features[2]: 0x%02X", rx.get_message()[6]);
-  ESP_LOGD(TAG, "Features[3]: 0x%02X", rx.get_message()[7]);
+  uint8_t hw_version = rx.get_message()[17 + rx.get_message()[8]];
+  uint8_t rom_code_version = rx.get_message()[18 + rx.get_message()[8]];
+  uint8_t flash_major_version = rx.get_message()[19 + rx.get_message()[8]];
+  uint8_t flash_minor_version = rx.get_message()[20 + rx.get_message()[8]];
+  std::vector<uint8_t> features(rx.get_message().begin() + 4, rx.get_message().begin() + 8);
+
+  ESP_LOGD(TAG, "Hardware version: %u", hw_version);
+  ESP_LOGD(TAG, "ROM code version: %u", rom_code_version);
+  ESP_LOGD(TAG, "FLASH major version: %u", flash_major_version);
+  ESP_LOGD(TAG, "FLASH minor version: %u", flash_minor_version);
+  ESP_LOGD(TAG, "Features: %s", nfc::format_bytes(features).c_str());
 
   return rx.get_simple_status_response();
 }
@@ -394,7 +393,7 @@ uint8_t PN7160::deactivate_(const uint8_t type, const uint16_t timeout) {
 
 void PN7160::select_endpoint_() {
   if (!this->discovered_endpoint_.size()) {
-    ESP_LOGE(TAG, "No cached tags to select");
+    ESP_LOGW(TAG, "No cached tags to select");
     this->stop_discovery_();
     this->nci_fsm_set_state_(NCIState::RFST_IDLE);
     return;
@@ -558,7 +557,7 @@ void PN7160::nci_fsm_transition_() {
       // fall through
 
     case NCIState::NFCC_INIT:
-      if (this->init_core_(true) != nfc::STATUS_OK) {
+      if (this->init_core_() != nfc::STATUS_OK) {
         ESP_LOGE(TAG, "Failed to initialise NCI core");
         this->nci_fsm_set_error_state_(NCIState::NFCC_INIT);
         return;
@@ -665,7 +664,7 @@ bool PN7160::nci_fsm_set_error_state_(NCIState new_state) {
       this->mark_failed();
       this->nci_fsm_set_state_(NCIState::FAILED);
     } else {
-      ESP_LOGE(TAG, "Too many errors transitioning to state %u; resetting NFCC", (uint8_t) this->nci_state_error_);
+      ESP_LOGW(TAG, "Too many errors transitioning to state %u; resetting NFCC", (uint8_t) this->nci_state_error_);
       this->nci_fsm_set_state_(NCIState::NFCC_RESET);
     }
   }
@@ -703,15 +702,15 @@ void PN7160::process_message_() {
       } else if (rx.get_gid() == nfc::NCI_CORE_GID) {
         switch (rx.get_oid()) {
           case nfc::NCI_CORE_GENERIC_ERROR_OID:
-            ESP_LOGW(TAG, "NCI_CORE_GENERIC_ERROR_OID:");
+            ESP_LOGV(TAG, "NCI_CORE_GENERIC_ERROR_OID:");
             switch (rx.get_simple_status_response()) {
               case nfc::DISCOVERY_ALREADY_STARTED:
-                ESP_LOGW(TAG, "  DISCOVERY_ALREADY_STARTED");
+                ESP_LOGV(TAG, "  DISCOVERY_ALREADY_STARTED");
                 break;
 
               case nfc::DISCOVERY_TARGET_ACTIVATION_FAILED:
                 // Tag removed too soon
-                ESP_LOGW(TAG, "  DISCOVERY_TARGET_ACTIVATION_FAILED");
+                ESP_LOGV(TAG, "  DISCOVERY_TARGET_ACTIVATION_FAILED");
                 if (this->nci_state_ == NCIState::EP_SELECTING) {
                   this->nci_fsm_set_state_(NCIState::RFST_W4_HOST_SELECT);
                   if (!this->discovered_endpoint_.empty()) {
@@ -724,7 +723,7 @@ void PN7160::process_message_() {
                 break;
 
               case nfc::DISCOVERY_TEAR_DOWN:
-                ESP_LOGW(TAG, "  DISCOVERY_TEAR_DOWN");
+                ESP_LOGV(TAG, "  DISCOVERY_TEAR_DOWN");
                 break;
 
               default:

@@ -209,7 +209,7 @@ class PN7160 : public Component {
 
  protected:
   uint8_t reset_core_(bool reset_config, bool power);
-  uint8_t init_core_(bool store_report);
+  uint8_t init_core_();
   uint8_t send_init_config_();
   uint8_t send_core_config_();
   uint8_t refresh_core_config_();
@@ -293,11 +293,6 @@ class PN7160 : public Component {
   uint32_t last_nci_state_change_{0};
   uint8_t selecting_endpoint_{0};
   uint32_t tag_ttl_{250};
-
-  uint8_t hw_version_{0};
-  uint8_t rom_code_version_{0};
-  uint8_t flash_major_version_{0};
-  uint8_t flash_minor_version_{0};
 
   GPIOPin *dwl_req_pin_{nullptr};
   GPIOPin *irq_pin_{nullptr};
