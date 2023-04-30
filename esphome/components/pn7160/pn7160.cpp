@@ -363,6 +363,7 @@ uint8_t PN7160::start_discovery_() {
   if (this->transceive_(tx, rx) != nfc::STATUS_OK) {
     switch (rx.get_simple_status_response()) {
       // in any of these cases, we are either already in or will remain in discovery, which satisfies the function call
+      case nfc::STATUS_OK:
       case nfc::DISCOVERY_ALREADY_STARTED:
       case nfc::DISCOVERY_TARGET_ACTIVATION_FAILED:
       case nfc::DISCOVERY_TEAR_DOWN:
